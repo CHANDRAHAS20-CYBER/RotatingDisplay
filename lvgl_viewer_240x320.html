@@ -1,0 +1,297 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>LVGL Image Viewer</title>
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    background: #111;
+    color: #ccc;
+    font-family: 'Segoe UI', monospace;
+    min-height: 100vh;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    padding: 30px 20px;
+    gap: 24px;
+  }
+  h1 { color: #fff; font-size: 20px; letter-spacing: 1px; }
+  .subtitle { color: #555; font-size: 13px; }
+
+  .drop-zone {
+    width: 100%;
+    max-width: 700px;
+    border: 2px dashed #444;
+    border-radius: 12px;
+    padding: 36px 20px;
+    text-align: center;
+    cursor: pointer;
+    transition: border-color 0.2s, background 0.2s;
+    background: #1a1a1a;
+  }
+  .drop-zone.hover { border-color: #4af; background: #1a2530; }
+  .drop-zone input { display: none; }
+  .drop-zone .icon { font-size: 40px; margin-bottom: 10px; }
+  .drop-zone p { color: #666; font-size: 14px; }
+  .drop-zone span { color: #4af; }
+
+  #status { font-size: 13px; color: #888; min-height: 18px; }
+
+  .gallery {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(200px, 1fr));
+    gap: 16px;
+    width: 100%;
+    max-width: 1100px;
+  }
+
+  .card {
+    background: #1a1a1a;
+    border: 1px solid #2a2a2a;
+    border-radius: 10px;
+    overflow: hidden;
+    transition: transform 0.15s, border-color 0.15s;
+    cursor: pointer;
+  }
+  .card:hover { transform: scale(1.03); border-color: #4af; }
+
+  .card canvas {
+    width: 100%;
+    height: auto;
+    display: block;
+    image-rendering: pixelated;
+  }
+
+  .card .label {
+    padding: 8px 10px;
+    font-size: 12px;
+    color: #888;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    border-top: 1px solid #222;
+  }
+
+  /* Modal */
+  .modal {
+    display: none;
+    position: fixed; inset: 0;
+    background: rgba(0,0,0,0.85);
+    z-index: 100;
+    align-items: center;
+    justify-content: center;
+    flex-direction: column;
+    gap: 16px;
+  }
+  .modal.open { display: flex; }
+  .modal canvas {
+    image-rendering: pixelated;
+    max-width: 90vw;
+    max-height: 80vh;
+    border: 2px solid #333;
+    border-radius: 4px;
+  }
+  .modal .info { color: #aaa; font-size: 13px; }
+  .modal .close-btn {
+    background: #333; border: none; color: #fff;
+    padding: 8px 24px; border-radius: 6px;
+    cursor: pointer; font-size: 14px;
+  }
+  .modal .close-btn:hover { background: #4af; color: #000; }
+</style>
+</head>
+<body>
+
+<h1>🖼 LVGL Image Viewer</h1>
+<p class="subtitle">Drop .c or .h image files — supports 240×320, 320×240, 240×240 and more</p>
+
+<div class="drop-zone" id="dropZone">
+  <div class="icon">📂</div>
+  <p>Drag &amp; drop <span>.c</span> or <span>.h</span> files here</p>
+  <p style="margin-top:6px">or <span onclick="document.getElementById('fileInput').click()" style="cursor:pointer;text-decoration:underline">browse files</span></p>
+  <input type="file" id="fileInput" accept=".c,.h" multiple>
+</div>
+
+<div id="status"></div>
+<div class="gallery" id="gallery"></div>
+
+<!-- Modal -->
+<div class="modal" id="modal">
+  <canvas id="modalCanvas"></canvas>
+  <div class="info" id="modalInfo"></div>
+  <button class="close-btn" onclick="closeModal()">✕ Close</button>
+</div>
+
+<script>
+const dropZone = document.getElementById('dropZone');
+const fileInput = document.getElementById('fileInput');
+const gallery   = document.getElementById('gallery');
+const status    = document.getElementById('status');
+const modal     = document.getElementById('modal');
+const modalCanvas = document.getElementById('modalCanvas');
+const modalInfo   = document.getElementById('modalInfo');
+
+// Drag & drop
+dropZone.addEventListener('dragover', e => { e.preventDefault(); dropZone.classList.add('hover'); });
+dropZone.addEventListener('dragleave', () => dropZone.classList.remove('hover'));
+dropZone.addEventListener('drop', e => {
+  e.preventDefault();
+  dropZone.classList.remove('hover');
+  handleFiles([...e.dataTransfer.files]);
+});
+dropZone.addEventListener('click', () => fileInput.click());
+fileInput.addEventListener('change', () => handleFiles([...fileInput.files]));
+
+function handleFiles(files) {
+  const valid = files.filter(f => f.name.endsWith('.c') || f.name.endsWith('.h'));
+  if (!valid.length) { status.textContent = 'No valid .c or .h files found.'; return; }
+  status.textContent = `Loading ${valid.length} file(s)...`;
+  let done = 0;
+  valid.forEach(file => {
+    const reader = new FileReader();
+    reader.onload = e => {
+      try {
+        renderImage(e.target.result, file.name);
+      } catch(err) {
+        console.error(file.name, err);
+        status.textContent = `Error in ${file.name}: ${err.message}`;
+      }
+      done++;
+      if (done === valid.length) status.textContent = `Loaded ${done} image(s).`;
+    };
+    reader.readAsText(file);
+  });
+}
+
+function parsePixels(text) {
+  // Try to detect format
+  const isH  = /uint16_t\s+\w+\[\]/.test(text);
+  const isC32 = /LV_COLOR_DEPTH == 32/.test(text);
+  const isC16 = /LV_COLOR_DEPTH == 16/.test(text);
+  const isRaw = /0x[0-9a-fA-F]{4}/.test(text);
+
+  let pixels = [];
+
+  if (isH || isRaw) {
+    // .h file or raw uint16_t array — grab all 4-digit hex values
+    const matches = text.match(/0x[0-9a-fA-F]{4}/g) || [];
+    for (const m of matches) {
+      const px = parseInt(m, 16);
+      const r5 = (px >> 11) & 0x1F;
+      const g6 = (px >> 5)  & 0x3F;
+      const b5 = (px >> 0)  & 0x1F;
+      pixels.push(
+        (r5 << 3) | (r5 >> 2),
+        (g6 << 2) | (g6 >> 4),
+        (b5 << 3) | (b5 >> 2),
+        255
+      );
+    }
+  } else if (isC16) {
+    // .c file: extract RGB565 no-swap block
+    const blockMatch = text.match(
+      /#if LV_COLOR_DEPTH == 16 && LV_COLOR_16_SWAP == 0([\s\S]*?)#endif/
+    );
+    const block = blockMatch ? blockMatch[1] : text;
+    const bytes = (block.match(/0x[0-9a-fA-F]{2}/g) || []).map(v => parseInt(v, 16));
+    for (let i = 0; i + 1 < bytes.length; i += 2) {
+      const px = (bytes[i+1] << 8) | bytes[i];
+      const r5 = (px >> 11) & 0x1F;
+      const g6 = (px >> 5)  & 0x3F;
+      const b5 = (px >> 0)  & 0x1F;
+      pixels.push(
+        (r5 << 3) | (r5 >> 2),
+        (g6 << 2) | (g6 >> 4),
+        (b5 << 3) | (b5 >> 2),
+        255
+      );
+    }
+  } else if (isC32) {
+    // RGBA8888
+    const blockMatch = text.match(/#if LV_COLOR_DEPTH == 32([\s\S]*?)#endif/);
+    const block = blockMatch ? blockMatch[1] : text;
+    const bytes = (block.match(/0x[0-9a-fA-F]{2}/g) || []).map(v => parseInt(v, 16));
+    for (let i = 0; i + 3 < bytes.length; i += 4) {
+      pixels.push(bytes[i], bytes[i+1], bytes[i+2], bytes[i+3]);
+    }
+  } else {
+    // Fallback: try any 2-byte hex groups
+    const bytes = (text.match(/0x[0-9a-fA-F]{2}/g) || []).map(v => parseInt(v, 16));
+    for (let i = 0; i + 1 < bytes.length; i += 2) {
+      const px = (bytes[i+1] << 8) | bytes[i];
+      const r5 = (px >> 11) & 0x1F;
+      const g6 = (px >> 5)  & 0x3F;
+      const b5 = (px >> 0)  & 0x1F;
+      pixels.push((r5<<3)|(r5>>2), (g6<<2)|(g6>>4), (b5<<3)|(b5>>2), 255);
+    }
+  }
+
+  return pixels;
+}
+
+function getSize(pixelCount) {
+  // Common LVGL sizes — 240×320 listed first so it wins for 76800 pixels
+  const sizes = [
+    [240,320],[320,240],   // TFT portrait & landscape
+    [240,240],             // Square TFT
+    [128,128],[64,64],     // Icon sizes
+    [480,320],[320,480],   // Larger TFTs
+    [160,128],[128,160],
+    [320,240],[240,400],
+    [800,480],[480,800],
+  ];
+  for (const [w,h] of sizes) if (w*h === pixelCount) return [w,h];
+  // Try square root
+  const sq = Math.round(Math.sqrt(pixelCount));
+  if (sq*sq === pixelCount) return [sq,sq];
+  // Default: treat as 240-wide portrait strip
+  return [240, Math.ceil(pixelCount/240)];
+}
+
+function renderImage(text, filename) {
+  const rgba = parsePixels(text);
+  const pixelCount = rgba.length / 4;
+  if (pixelCount < 1) throw new Error('No pixel data found');
+
+  const [w, h] = getSize(pixelCount);
+
+  // Thumbnail canvas
+  const canvas = document.createElement('canvas');
+  canvas.width  = w;
+  canvas.height = h;
+  const ctx = canvas.getContext('2d');
+  const imgData = new ImageData(new Uint8ClampedArray(rgba.slice(0, w*h*4)), w, h);
+  ctx.putImageData(imgData, 0, 0);
+
+  // Card
+  const card = document.createElement('div');
+  card.className = 'card';
+  const label = document.createElement('div');
+  label.className = 'label';
+  label.textContent = `${filename}  •  ${w}×${h}`;
+  card.appendChild(canvas);
+  card.appendChild(label);
+
+  card.addEventListener('click', () => openModal(rgba, w, h, filename));
+  gallery.appendChild(card);
+}
+
+function openModal(rgba, w, h, filename) {
+  const scale = Math.min(Math.floor(800/w), Math.floor(700/h), 3) || 1;
+  modalCanvas.width  = w;
+  modalCanvas.height = h;
+  modalCanvas.style.width  = (w * scale) + 'px';
+  modalCanvas.style.height = (h * scale) + 'px';
+  const ctx = modalCanvas.getContext('2d');
+  ctx.putImageData(new ImageData(new Uint8ClampedArray(rgba), w, h), 0, 0);
+  modalInfo.textContent = `${filename}  •  ${w}×${h}  •  ${rgba.length/4} pixels`;
+  modal.classList.add('open');
+}
+
+function closeModal() { modal.classList.remove('open'); }
+modal.addEventListener('click', e => { if (e.target === modal) closeModal(); });
+document.addEventListener('keydown', e => { if (e.key === 'Escape') closeModal(); });
+</script>
+</body>
+</html>
